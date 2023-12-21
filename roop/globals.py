@@ -10,6 +10,7 @@ frame_processors: List[str] = []
 keep_fps = None
 keep_frames = None
 skip_audio = None
+wait_after_extraction = None
 many_faces = None
 use_batch = None
 source_face_index = 0
@@ -28,11 +29,13 @@ blend_ratio = 0.5
 distance_threshold = 0.65
 default_det_size = True
 
+no_face_action = 0
+
 processing = False 
 
 FACE_ENHANCER = None
 
-INPUT_FACES = []
+INPUT_FACESETS = []
 TARGET_FACES = []
 
 IMAGE_CHAIN_PROCESSOR = None

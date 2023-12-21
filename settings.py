@@ -36,6 +36,8 @@ class Settings:
         self.provider = self.default_get(data, 'provider', 'cuda')
         self.force_cpu = self.default_get(data, 'force_cpu', False)
         self.output_template = self.default_get(data, 'output_template', '{file}_{time}')
+        self.use_os_temp_folder = self.default_get(data, 'use_os_temp_folder', False)
+
 
 
 
@@ -54,10 +56,10 @@ class Settings:
             'live_cam_start_active' : self.live_cam_start_active,
             'max_threads' : self.max_threads,
             'memory_limit' : self.memory_limit,
-            'frame_buffer_size' : self.frame_buffer_size,
             'provider' : self.provider,
             'force_cpu' : self.force_cpu,
-			'output_template' : self.output_template
+			'output_template' : self.output_template,
+            'use_os_temp_folder' : self.use_os_temp_folder
         }
         with open(self.config_file, 'w') as f:
             yaml.dump(data, f)

@@ -5,7 +5,7 @@ import psutil
 
 from roop.ProcessOptions import ProcessOptions
 
-from roop.face_util import get_first_face, get_all_faces
+from roop.face_util import get_first_face, get_all_faces, rotate_image_180
 from roop.utilities import compute_cosine_distance, get_device, str_to_class
 
 from typing import Any, List, Callable
@@ -57,11 +57,6 @@ class ProcessMgr():
 
     
 
-    # 5-point template constant for face alignment - don't ask
-    insight_arcface_dst = np.array(
-            [[38.2946, 51.6963], [73.5318, 51.5014], [56.0252, 71.7366],
-            [41.5493, 92.3655], [70.7299, 92.2041]],
-            dtype=np.float32)  
 
     plugins =  { 
     'faceswap'      : 'FaceSwapInsightFace',
@@ -69,6 +64,7 @@ class ProcessMgr():
     'codeformer'    : 'Enhance_CodeFormer',
     'gfpgan'        : 'Enhance_GFPGAN',
     'dmdnet'        : 'Enhance_DMDNet',
+    'gpen'          : 'Enhance_GPEN',
     }
 
     def __init__(self, progress):
@@ -166,11 +162,11 @@ class ProcessMgr():
             frame = self.frames_queue[threadindex].get()
             if frame is None:
                 self.processing_threads -= 1
-                self.processed_queue[threadindex].put(None)
+                self.processed_queue[threadindex].put((False, None))
                 return
             else:
                 resimg = self.process_frame(frame)
-                self.processed_queue[threadindex].put(resimg)
+                self.processed_queue[threadindex].put((True, resimg))
                 del frame
                 progress()
 
@@ -180,12 +176,12 @@ class ProcessMgr():
         num_producers = self.num_threads
         
         while True:
-            frame = self.processed_queue[nextindex % self.num_threads].get()
+            process, frame = self.processed_queue[nextindex % self.num_threads].get()
             nextindex += 1
             if frame is not None:
                 self.videowriter.write_frame(frame)
                 del frame
-            else:
+            elif process == False:
                 num_producers -= 1
                 if num_producers < 1:
                     return
@@ -210,15 +206,6 @@ class ProcessMgr():
             self.processed_queue.append(Queue(1))
 
         self.videowriter =  FFMPEG_VideoWriter(target_video, (width, height), fps, codec=roop.globals.video_encoder, crf=roop.globals.video_quality, audiofile=None)
-        if not skip_audio and frame_start > 0:
-            print('Writing offset frames')
-            num_write = frame_start
-            cap.set(cv2.CAP_PROP_POS_FRAMES,frame_start)
-            ret, frame = cap.read()
-            fake_frame = self.process_frame(frame)
-            while num_write > 0:
-                self.videowriter.write_frame(fake_frame)
-                num_write -= 1           
 
         readthread = Thread(target=self.read_frames_thread, args=(cap, frame_start, frame_end, threads))
         readthread.start()
@@ -260,31 +247,64 @@ class ProcessMgr():
         self.progress_gradio((progress.n, self.total_frames), desc='Processing', total=self.total_frames, unit='frames')
 
 
+    def on_no_face_action(self, frame:Frame):
+        if roop.globals.no_face_action == 0:
+            return None, frame
+        elif roop.globals.no_face_action == 2:
+            return None, None
 
-       
+        
+        faces = get_all_faces(frame)
+        if faces is not None:
+            return faces, frame
+        return None, frame
+      
+
+
 
     def process_frame(self, frame:Frame):
         if len(self.input_face_datas) < 1:
             return frame
     
         temp_frame = frame.copy()
+        num_swapped, temp_frame = self.swap_faces(frame, temp_frame)
+        if num_swapped > 0:
+            return temp_frame
+        if roop.globals.no_face_action == 0:
+            return frame
+        if roop.globals.no_face_action == 2:
+            return None
+        else:
+            copyframe = frame.copy()
+            copyframe = rotate_image_180(copyframe)
+            temp_frame = copyframe.copy()
+            num_swapped, temp_frame = self.swap_faces(copyframe, temp_frame)
+            if num_swapped == 0:
+                return frame
+            temp_frame = rotate_image_180(temp_frame)
+            return temp_frame
 
+
+
+    def swap_faces(self, frame, temp_frame):
+        num_faces_found = 0
         if self.options.swap_mode == "first":
             face = get_first_face(frame)
             if face is None:
-                return frame
-            return self.process_face(self.options.selected_index, face, temp_frame)
+                return num_faces_found, frame
+            num_faces_found += 1
+            temp_frame = self.process_face(self.options.selected_index, face, temp_frame)
 
         else:
             faces = get_all_faces(frame)
             if faces is None:
-                return frame
+                return num_faces_found, frame
             
             if self.options.swap_mode == "all":
                 for face in faces:
+                    num_faces_found += 1
                     temp_frame = self.process_face(self.options.selected_index, face, temp_frame)
                     del face
-                return temp_frame
             
             elif self.options.swap_mode == "selected":
                 for i,tf in enumerate(self.target_face_datas):
@@ -292,73 +312,82 @@ class ProcessMgr():
                         if compute_cosine_distance(tf.embedding, face.embedding) <= self.options.face_distance_threshold:
                             if i < len(self.input_face_datas):
                                 temp_frame = self.process_face(i, face, temp_frame)
+                                num_faces_found += 1
                             break
                         del face
-
             elif self.options.swap_mode == "all_female" or self.options.swap_mode == "all_male":
-                gender = 'F' if self.swap_mode == "all_female" else 'M'
+                gender = 'F' if self.options.swap_mode == "all_female" else 'M'
                 for face in faces:
                     if face.sex == gender:
+                        num_faces_found += 1
                         temp_frame = self.process_face(self.options.selected_index, face, temp_frame)
                     del face
 
-        return temp_frame
+        if num_faces_found == 0:
+            return num_faces_found, frame
+
+        maskprocessor = next((x for x in self.processors if x.processorname == 'clip2seg'), None)
+        if maskprocessor is not None:
+            temp_frame = self.process_mask(maskprocessor, frame, temp_frame)
+        return num_faces_found, temp_frame
 
 
     def process_face(self,face_index, target_face, frame:Frame):
         enhanced_frame = None
-        img_mask = None
+        inputface = self.input_face_datas[face_index].faces[0]
+
         for p in self.processors:
             if p.type == 'swap':
-                fake_frame = p.Run(self.input_face_datas[face_index], target_face, frame)
+                fake_frame = p.Run(inputface, target_face, frame)
                 scale_factor = 0.0
             elif p.type == 'mask':
-                start_x, start_y, end_x, end_y = map(int, target_face['bbox'])
-                orig_frame = frame[start_y:end_y, start_x:end_x]
-                img_mask = p.Run(orig_frame, self.options.masking_text)
+                continue
             else:
                 enhanced_frame, scale_factor = p.Run(self.input_face_datas[face_index], target_face, fake_frame)
 
         upscale = 512
         orig_width = fake_frame.shape[1]
         fake_frame = cv2.resize(fake_frame, (upscale, upscale), cv2.INTER_CUBIC)
-        mask_top = self.input_face_datas[face_index].mask_top
+        mask_offsets = inputface.mask_offsets
+        
         if enhanced_frame is None:
             scale_factor = int(upscale / orig_width)
-            result = self.paste_upscale(fake_frame, fake_frame, target_face.matrix, frame, scale_factor, mask_top)
+            result = self.paste_upscale(fake_frame, fake_frame, target_face.matrix, frame, scale_factor, mask_offsets)
         else:
-            result = self.paste_upscale(fake_frame, enhanced_frame, target_face.matrix, frame, scale_factor, mask_top)
-        if img_mask is not None:
-            target = result[start_y:end_y, start_x:end_x]
-            img_mask = cv2.resize(img_mask, (target.shape[1], target.shape[0]))
-            img_mask = np.reshape(img_mask, [img_mask.shape[0],img_mask.shape[1],1])
-    
-            target = target.astype(np.float32)
-            clip = (1-img_mask) * target
-            clip += img_mask * orig_frame.astype(np.float32)
-            result[start_y:end_y, start_x:end_x] = clip
-            return result
-
+            result = self.paste_upscale(fake_frame, enhanced_frame, target_face.matrix, frame, scale_factor, mask_offsets)
         return result
 
         
 
 
-    
+    def cutout(self, frame:Frame, start_x, start_y, end_x, end_y):
+        if start_x < 0:
+            start_x = 0
+        if start_y < 0:
+            start_y = 0
+        if end_x > frame.shape[1]:
+            end_x = frame.shape[1]
+        if end_y > frame.shape[0]:
+            end_y = frame.shape[0]
+        return frame[start_y:end_y, start_x:end_x], start_x, start_y, end_x, end_y
+
+        
     
     # Paste back adapted from here
     # https://github.com/fAIseh00d/refacer/blob/main/refacer.py
     # which is revised insightface paste back code
 
-    def paste_upscale(self, fake_face, upsk_face, M, target_img, scale_factor, mask_top):
+    def paste_upscale(self, fake_face, upsk_face, M, target_img, scale_factor, mask_offsets):
         M_scale = M * scale_factor
         IM = cv2.invertAffineTransform(M_scale)
 
         face_matte = np.full((target_img.shape[0],target_img.shape[1]), 255, dtype=np.uint8)
         ##Generate white square sized as a upsk_face
         img_matte = np.full((upsk_face.shape[0],upsk_face.shape[1]), 255, dtype=np.uint8)
-        if mask_top > 0:
-            img_matte[:mask_top,:] = 0
+        if mask_offsets[0] > 0:
+            img_matte[:mask_offsets[0],:] = 0
+        if mask_offsets[1] > 0:
+            img_matte[-mask_offsets[1]:,:] = 0
 
         ##Transform white square back to target_img
         img_matte = cv2.warpAffine(img_matte, IM, (target_img.shape[1], target_img.shape[0]), flags=cv2.INTER_NEAREST, borderValue=0.0) 
@@ -404,17 +433,15 @@ class ProcessMgr():
         return paste_face.astype(np.uint8)
 
 
-    def process_mask(self, frame:Frame, target:Frame):
-        for p in self.processors:
-            if p.type == 'mask':
-                img_mask = p.Run(frame, self.options.masking_text)
-                img_mask = cv2.resize(img_mask, (target.shape[1], target.shape[0]))
-                img_mask = np.reshape(img_mask, [img_mask.shape[0],img_mask.shape[1],1])
-       
-                target = target.astype(np.float32)
-                result = (1-img_mask) * target
-                result += img_mask * frame.astype(np.float32)
-                return np.uint8(result)
+    def process_mask(self, processor, frame:Frame, target:Frame):
+        img_mask = processor.Run(frame, self.options.masking_text)
+        img_mask = cv2.resize(img_mask, (target.shape[1], target.shape[0]))
+        img_mask = np.reshape(img_mask, [img_mask.shape[0],img_mask.shape[1],1])
+
+        target = target.astype(np.float32)
+        result = (1-img_mask) * target
+        result += img_mask * frame.astype(np.float32)
+        return np.uint8(result)
 
             
 
@@ -427,6 +454,4 @@ class ProcessMgr():
         for p in self.processors:
             p.Release()
         self.processors.clear()
-
-        
 

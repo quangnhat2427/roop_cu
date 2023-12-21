@@ -8,28 +8,25 @@ from roop.typing import Face, Frame, FaceSet
 from roop.utilities import resolve_relative_path
 
 
-# THREAD_LOCK = threading.Lock()
+class Enhance_GPEN():
 
-
-class Enhance_GFPGAN():
-
-    model_gfpgan = None
+    model_gpen = None
     name = None
     devicename = None
 
-    processorname = 'gfpgan'
+    processorname = 'gpen'
     type = 'enhance'
 
 
     def Initialize(self, devicename):
-        if self.model_gfpgan is None:
-            model_path = resolve_relative_path('../models/GFPGANv1.4.onnx')
-            self.model_gfpgan = onnxruntime.InferenceSession(model_path, None, providers=roop.globals.execution_providers)
+        if self.model_gpen is None:
+            model_path = resolve_relative_path('../models/GPEN-BFR-512.onnx')
+            self.model_gpen = onnxruntime.InferenceSession(model_path, None, providers=roop.globals.execution_providers)
             # replace Mac mps with cpu for the moment
             devicename = devicename.replace('mps', 'cpu')
             self.devicename = devicename
 
-        self.name = self.model_gfpgan.get_inputs()[0].name
+        self.name = self.model_gpen.get_inputs()[0].name
 
     def Run(self, source_faceset: FaceSet, target_face: Face, temp_frame: Frame) -> Frame:
         # preprocess
@@ -41,10 +38,10 @@ class Enhance_GFPGAN():
         temp_frame = (temp_frame - 0.5) / 0.5
         temp_frame = np.expand_dims(temp_frame, axis=0).transpose(0, 3, 1, 2)
 
-        io_binding = self.model_gfpgan.io_binding()           
+        io_binding = self.model_gpen.io_binding()           
         io_binding.bind_cpu_input("input", temp_frame)
-        io_binding.bind_output("1288", self.devicename)
-        self.model_gfpgan.run_with_iobinding(io_binding)
+        io_binding.bind_output("output", self.devicename)
+        self.model_gpen.run_with_iobinding(io_binding)
         ort_outs = io_binding.copy_outputs_to_cpu()
         result = ort_outs[0][0]
 
@@ -58,15 +55,4 @@ class Enhance_GFPGAN():
 
 
     def Release(self):
-        self.model_gfpgan = None
-
-
-
-
-
-
-
-
-
-
-
+        self.model_gpen = None
